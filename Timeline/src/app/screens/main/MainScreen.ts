@@ -1,15 +1,14 @@
 import { FancyButton } from "@pixi/ui";
 import { animate } from "motion";
 import type { AnimationPlaybackControls } from "motion/react";
-import type { Ticker } from "pixi.js";
-import { Container } from "pixi.js";
+import type { DestroyOptions, FederatedPointerEvent, Ticker } from "pixi.js";
+import { Container, Graphics } from "pixi.js";
 
 import { engine } from "../../getEngine";
 import { PausePopup } from "../../popups/PausePopup";
 import { SettingsPopup } from "../../popups/SettingsPopup";
-import { Button } from "../../ui/Button";
-
-import { Bouncer } from "./Bouncer";
+import { Timeline } from "./Timeline";
+import { timelineEvents } from "./timelineData";
 
 /** The screen that holds the app */
 export class MainScreen extends Container {
@@ -19,17 +18,47 @@ export class MainScreen extends Container {
   public mainContainer: Container;
   private pauseButton: FancyButton;
   private settingsButton: FancyButton;
-  private addButton: FancyButton;
-  private removeButton: FancyButton;
-  private bouncer: Bouncer;
+  private timeline: Timeline;
   private paused = false;
+  private zoomLevel = 1;
+  private wheelCanvas?: HTMLCanvasElement;
+  private panSurface: Graphics;
+  private isPanning = false;
+  private lastPanX = 0;
+  private pointerAxisX = 0;
+  private readonly onWheel = (event: WheelEvent) => {
+    event.preventDefault();
+    const zoomFactor = Math.exp(-event.deltaY * 0.001);
+    const nextZoom = this.zoomLevel * zoomFactor;
+    this.zoomLevel = Math.min(1e6, Math.max(1e-6, nextZoom));
+    this.timeline.zoomAt(this.pointerAxisX, this.zoomLevel);
+  };
 
   constructor() {
     super();
 
     this.mainContainer = new Container();
+    this.mainContainer.sortableChildren = true;
     this.addChild(this.mainContainer);
-    this.bouncer = new Bouncer();
+    this.panSurface = new Graphics();
+    this.panSurface.zIndex = -1;
+    this.panSurface.alpha = 0;
+    this.panSurface.eventMode = "static";
+    this.panSurface.cursor = "grab";
+    this.panSurface.on("pointerdown", this.handlePanStart);
+    this.panSurface.on("pointermove", this.handlePointerHover);
+    this.panSurface.on("pointerover", this.handlePointerHover);
+    this.panSurface.on("pointerup", this.handlePanEnd);
+    this.panSurface.on("pointerupoutside", this.handlePanEnd);
+    this.panSurface.on("pointercancel", this.handlePanEnd);
+    this.panSurface.on("globalpointermove", this.handlePanMove);
+    this.panSurface.on("globalpointerup", this.handlePanEnd);
+    this.mainContainer.addChild(this.panSurface);
+    this.timeline = new Timeline(timelineEvents);
+    this.timeline.zIndex = 1;
+    this.mainContainer.addChild(this.timeline);
+    this.timeline.setZoom(this.zoomLevel);
+    this.attachWheelListener();
 
     const buttonAnimations = {
       hover: {
@@ -64,22 +93,6 @@ export class MainScreen extends Container {
       engine().navigation.presentPopup(SettingsPopup),
     );
     this.addChild(this.settingsButton);
-
-    this.addButton = new Button({
-      text: "Add",
-      width: 175,
-      height: 110,
-    });
-    this.addButton.onPress.connect(() => this.bouncer.add());
-    this.addChild(this.addButton);
-
-    this.removeButton = new Button({
-      text: "Remove",
-      width: 175,
-      height: 110,
-    });
-    this.removeButton.onPress.connect(() => this.bouncer.remove());
-    this.addChild(this.removeButton);
   }
 
   /** Prepare the screen just before showing */
@@ -89,7 +102,6 @@ export class MainScreen extends Container {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   public update(_time: Ticker) {
     if (this.paused) return;
-    this.bouncer.update();
   }
 
   /** Pause gameplay - automatically fired when a popup is presented */
@@ -118,12 +130,13 @@ export class MainScreen extends Container {
     this.pauseButton.y = 30;
     this.settingsButton.x = width - 30;
     this.settingsButton.y = 30;
-    this.removeButton.x = width / 2 - 100;
-    this.removeButton.y = height - 75;
-    this.addButton.x = width / 2 + 100;
-    this.addButton.y = height - 75;
 
-    this.bouncer.resize(width, height);
+    this.panSurface
+      .clear()
+      .rect(-width / 2, -height / 2, width, height)
+      .fill({ color: 0xffffff, alpha: 0.0001 });
+
+    this.timeline.resize(width, height);
   }
 
   /** Show screen with animations */
@@ -133,8 +146,7 @@ export class MainScreen extends Container {
     const elementsToAnimate = [
       this.pauseButton,
       this.settingsButton,
-      this.addButton,
-      this.removeButton,
+      this.timeline,
     ];
 
     let finalPromise!: AnimationPlaybackControls;
@@ -148,7 +160,6 @@ export class MainScreen extends Container {
     }
 
     await finalPromise;
-    this.bouncer.show(this);
   }
 
   /** Hide screen with animations */
@@ -159,5 +170,65 @@ export class MainScreen extends Container {
     if (!engine().navigation.currentPopup) {
       engine().navigation.presentPopup(PausePopup);
     }
+  }
+
+  public override destroy(options?: DestroyOptions): void {
+    this.detachWheelListener();
+    this.panSurface.removeListener("pointerdown", this.handlePanStart);
+    this.panSurface.removeListener("pointermove", this.handlePointerHover);
+    this.panSurface.removeListener("pointerover", this.handlePointerHover);
+    this.panSurface.removeListener("pointerup", this.handlePanEnd);
+    this.panSurface.removeListener("pointerupoutside", this.handlePanEnd);
+    this.panSurface.removeListener("pointercancel", this.handlePanEnd);
+    this.panSurface.removeListener("globalpointermove", this.handlePanMove);
+    this.panSurface.removeListener("globalpointerup", this.handlePanEnd);
+    super.destroy(options);
+  }
+
+  private attachWheelListener(): void {
+    const canvas = engine().canvas;
+    if (!canvas || this.wheelCanvas === canvas) return;
+    this.detachWheelListener();
+    this.wheelCanvas = canvas;
+    this.wheelCanvas.addEventListener("wheel", this.onWheel, {
+      passive: false,
+    });
+  }
+
+  private detachWheelListener(): void {
+    if (!this.wheelCanvas) return;
+    this.wheelCanvas.removeEventListener("wheel", this.onWheel);
+    this.wheelCanvas = undefined;
+  }
+
+  private handlePanStart = (event: FederatedPointerEvent): void => {
+    if (event.button !== 0) return;
+    this.updatePointerAxis(event);
+    this.isPanning = true;
+    this.lastPanX = event.global.x;
+    this.panSurface.cursor = "grabbing";
+  };
+
+  private handlePanMove = (event: FederatedPointerEvent): void => {
+    this.updatePointerAxis(event);
+    if (!this.isPanning) return;
+    const delta = event.global.x - this.lastPanX;
+    this.lastPanX = event.global.x;
+    this.timeline.pan(delta);
+  };
+
+  private handlePanEnd = (): void => {
+    if (!this.isPanning) return;
+    this.isPanning = false;
+    this.panSurface.cursor = "grab";
+  };
+
+  private handlePointerHover = (event: FederatedPointerEvent): void => {
+    this.updatePointerAxis(event);
+  };
+
+  private updatePointerAxis(event: FederatedPointerEvent): void {
+    const local = this.mainContainer.toLocal(event.global);
+    this.pointerAxisX = local.x;
   }
 }
