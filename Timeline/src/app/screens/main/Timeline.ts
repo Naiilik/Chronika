@@ -1,8 +1,13 @@
 import { Container, Graphics, Text } from "pixi.js";
 
 import { Label } from "../../ui/Label";
+import { getDescriptionPreview } from "../../utils/markdown";
 
-import type { TimelineEventData } from "./timelineData";
+import type {
+  TimelineEntryData,
+  TimelineEventData,
+  TimelineSpanData,
+} from "./timelineData";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -146,6 +151,13 @@ type InternalEvent = TimelineEventData & {
   accentColor: number;
 };
 
+type InternalSpan = TimelineSpanData & {
+  startTimestamp: number;
+  endTimestamp: number;
+  accentColor: number;
+  hovered?: boolean;
+};
+
 interface TimelineEventView {
   container: Container;
   marker: Graphics;
@@ -157,7 +169,18 @@ interface TimelineEventView {
   index: number;
 }
 
+interface TimelineSpanView {
+  container: Container;
+  glow: Graphics;
+  ribbon: Graphics;
+  titleLabel: Label;
+  rangeLabel: Text;
+  descriptionLabel: Text;
+  data: InternalSpan;
+}
+
 const ACCENT_PALETTE = [0xec1561, 0xef6294, 0x7b88ff, 0xffc857];
+const SPAN_ACCENT_PALETTE = [0x7b88ff, 0xec1561, 0x2ce6cf, 0xff8a5b];
 type LabelVisibility = {
   date: boolean;
   title: boolean;
@@ -177,47 +200,128 @@ const MIN_LABEL_GAP = 24;
  * Simple PIXI based timeline visualization with configurable zoom level.
  */
 export class Timeline extends Container {
-  private readonly events: TimelineEventView[];
+  private events: TimelineEventView[] = [];
+  private spanViews: TimelineSpanView[] = [];
   private readonly axis: Graphics;
+  private readonly spanLayer: Container;
   private readonly leftArrow: Graphics;
   private readonly rightArrow: Graphics;
   private readonly tickContainer: Container;
-  private readonly minTime: number;
-  private readonly maxTime: number;
-  private readonly range: number;
+  private minTime = Date.now();
+  private maxTime = this.minTime;
+  private range = 1;
   private viewportWidth = 0;
   private viewportHeight = 0;
   private zoom = 1;
   private panOffset = 0;
+  private readonly onSelectEntry?: (entry: TimelineEntryData) => void;
+  private filterTags = new Set<string>();
 
-  constructor(events: TimelineEventData[]) {
+  constructor(
+    entries: TimelineEntryData[],
+    onSelectEntry?: (entry: TimelineEntryData) => void,
+  ) {
     super();
+    this.onSelectEntry = onSelectEntry;
 
-    const normalizedEvents: InternalEvent[] = events
-      .map((event, index) => ({
-        ...event,
-        timestamp: new Date(event.date).getTime(),
-        accentColor: ACCENT_PALETTE[index % ACCENT_PALETTE.length],
-      }))
-      .sort((a, b) => a.timestamp - b.timestamp);
-
-    this.minTime = normalizedEvents[0]?.timestamp ?? Date.now();
-    this.maxTime = normalizedEvents.at(-1)?.timestamp ?? this.minTime;
-    this.range = Math.max(1, this.maxTime - this.minTime);
-
+    this.spanLayer = new Container();
+    this.spanLayer.sortableChildren = true;
     this.axis = new Graphics();
     this.leftArrow = new Graphics();
     this.rightArrow = new Graphics();
     this.tickContainer = new Container();
 
+    this.addChild(this.spanLayer);
     this.addChild(this.axis);
+    this.addChild(this.tickContainer);
     this.addChild(this.leftArrow);
     this.addChild(this.rightArrow);
-    this.addChild(this.tickContainer);
+
+    this.setEntries(entries);
+  }
+
+  public setFilter(tags: string[]): void {
+    this.filterTags = new Set(tags);
+    this.layout();
+  }
+
+  public setEntries(entries: TimelineEntryData[]): void {
+    for (const view of this.events) {
+      view.container.destroy({ children: true });
+    }
+    for (const view of this.spanViews) {
+      view.container.destroy({ children: true });
+    }
+    this.spanLayer.removeChildren();
+    this.events = [];
+    this.spanViews = [];
+
+    const normalizedEvents: InternalEvent[] = [];
+    const normalizedSpans: InternalSpan[] = [];
+
+    let spanIndex = 0;
+    let eventIndex = 0;
+    for (const entry of entries) {
+      if (entry.type === "event") {
+        const timestamp = new Date(entry.date).getTime();
+        if (!Number.isFinite(timestamp)) continue;
+        normalizedEvents.push({
+          ...entry,
+          timestamp,
+          accentColor: ACCENT_PALETTE[eventIndex % ACCENT_PALETTE.length],
+        });
+        eventIndex += 1;
+      } else {
+        const startTimestamp = new Date(entry.startDate).getTime();
+        const endTimestamp = new Date(entry.endDate).getTime();
+        if (
+          !Number.isFinite(startTimestamp) ||
+          !Number.isFinite(endTimestamp)
+        ) {
+          continue;
+        }
+        normalizedSpans.push({
+          ...entry,
+          startTimestamp: Math.min(startTimestamp, endTimestamp),
+          endTimestamp: Math.max(startTimestamp, endTimestamp),
+          accentColor:
+            SPAN_ACCENT_PALETTE[spanIndex % SPAN_ACCENT_PALETTE.length],
+        });
+        spanIndex += 1;
+      }
+    }
+
+    normalizedEvents.sort((a, b) => a.timestamp - b.timestamp);
+    normalizedSpans.sort((a, b) => a.startTimestamp - b.startTimestamp);
+
+    const timestamps: number[] = [];
+    for (const event of normalizedEvents) {
+      if (Number.isFinite(event.timestamp)) {
+        timestamps.push(event.timestamp);
+      }
+    }
+    for (const span of normalizedSpans) {
+      if (Number.isFinite(span.startTimestamp)) {
+        timestamps.push(span.startTimestamp);
+      }
+      if (Number.isFinite(span.endTimestamp)) {
+        timestamps.push(span.endTimestamp);
+      }
+    }
+
+    const now = Date.now();
+    if (timestamps.length === 0) {
+      timestamps.push(now);
+    }
+    this.minTime = Math.min(...timestamps);
+    this.maxTime = Math.max(...timestamps);
+    this.range = Math.max(1, this.maxTime - this.minTime);
 
     this.events = normalizedEvents.map((event, index) =>
       this.createEventView(event, index),
     );
+    this.spanViews = normalizedSpans.map((span) => this.createSpanView(span));
+    this.layout();
   }
 
   /** Update layout whenever the viewport changes */
@@ -275,7 +379,7 @@ export class Timeline extends Container {
     const timelineWidth = baseWidth * this.zoom;
     const startX = -timelineWidth / 2;
     const offsetStart = startX + this.panOffset;
-    const amplitude = Math.max(140, Math.min(this.viewportHeight * 0.25, 260));
+    const amplitude = Math.max(110, Math.min(this.viewportHeight * 0.18, 180));
     const arrowSize = 18;
     const visiblePadding = 60;
     const visibleMinX = -this.viewportWidth * 0.5 - visiblePadding;
@@ -302,7 +406,11 @@ export class Timeline extends Container {
     const fallbackDivisor = Math.max(1, this.events.length - 1);
     const visibleViews: TimelineEventView[] = [];
 
+    const showUntaggedOnly = this.filterTags.size === 0;
     for (const view of this.events) {
+      const matchesFilter = showUntaggedOnly
+        ? view.data.tags.length === 0
+        : view.data.tags.some((tag) => this.filterTags.has(tag));
       const index = view.index;
       const normalizedValue =
         this.maxTime === this.minTime
@@ -312,21 +420,23 @@ export class Timeline extends Container {
       view.container.x = offsetStart + normalizedValue * timelineWidth;
       view.container.y = 0;
       const isVisible =
-        view.container.x >= visibleMinX && view.container.x <= visibleMaxX;
+        matchesFilter &&
+        view.container.x >= visibleMinX &&
+        view.container.x <= visibleMaxX;
       view.container.visible = isVisible;
       if (isVisible) {
         visibleViews.push(view);
       }
 
       const direction = index % 2 === 0 ? -1 : 1;
-      const stemLength = amplitude - 30;
-      const textBaseY = direction * (stemLength + 35);
+      const stemLength = amplitude - 20;
+      const textBaseY = direction * (stemLength + 32);
 
       view.stem
         .clear()
         .moveTo(0, 0)
         .lineTo(0, direction * stemLength)
-        .stroke({ width: 2, color: 0xffffff, alpha: 0.4 });
+        .stroke({ width: 1.6, color: 0xffffff, alpha: 0.35 });
 
       view.marker.y = 0;
 
@@ -338,10 +448,17 @@ export class Timeline extends Container {
 
       view.descriptionLabel.anchor.set(0.5, direction === 1 ? 0 : 1);
       view.descriptionLabel.x = 0;
-      view.descriptionLabel.y = textBaseY + direction * 74;
+      view.descriptionLabel.y = textBaseY + direction * 60;
     }
 
     this.applyLabelVisibility(visibleViews);
+    this.layoutSpans(
+      offsetStart,
+      timelineWidth,
+      visibleMinX,
+      visibleMaxX,
+      showUntaggedOnly,
+    );
     this.layoutTicks(offsetStart, timelineWidth, visibleMinX, visibleMaxX);
   }
 
@@ -418,8 +535,9 @@ export class Timeline extends Container {
     const widths: number[] = [];
     if (visibility.date) widths.push(view.dateLabel.width);
     if (visibility.title) widths.push(view.titleLabel.width);
-    if (visibility.description)
+    if (visibility.description) {
       widths.push(view.descriptionLabel.width);
+    }
 
     if (widths.length === 0) {
       return BASE_LABEL_WIDTH * 0.5 + LABEL_HORIZONTAL_PADDING;
@@ -495,22 +613,212 @@ export class Timeline extends Container {
     }
   }
 
+  private layoutSpans(
+    startX: number,
+    width: number,
+    visibleMinX: number,
+    visibleMaxX: number,
+    showUntaggedOnly: boolean,
+  ): void {
+    if (!Number.isFinite(width) || width <= 0) return;
+
+    const capsuleHeight = 46;
+    const radius = 22;
+    const glowPadding = 10;
+
+    for (const view of this.spanViews) {
+      const matchesFilter = showUntaggedOnly
+        ? view.data.tags.length === 0
+        : view.data.tags.some((tag) => this.filterTags.has(tag));
+      const normalizedStart =
+        this.maxTime === this.minTime
+          ? 0.45
+          : (view.data.startTimestamp - this.minTime) / this.range;
+      const normalizedEnd =
+        this.maxTime === this.minTime
+          ? 0.55
+          : (view.data.endTimestamp - this.minTime) / this.range;
+      const pxStart = startX + normalizedStart * width;
+      const pxEnd = startX + normalizedEnd * width;
+      const left = Math.min(pxStart, pxEnd);
+      const right = Math.max(pxStart, pxEnd);
+      const spanWidth = Math.max(32, right - left);
+      view.container.x = left + spanWidth * 0.5;
+
+      const isVisible = right >= visibleMinX && left <= visibleMaxX;
+      view.container.visible = isVisible && matchesFilter;
+      if (!view.container.visible) continue;
+
+      view.container.y = 0;
+
+      view.glow
+        .clear()
+        .roundRect(
+          -spanWidth / 2 - glowPadding,
+          -capsuleHeight / 2 - glowPadding * 0.25,
+          spanWidth + glowPadding * 2,
+          capsuleHeight + glowPadding * 0.5,
+          radius + glowPadding,
+        )
+        .fill({ color: view.data.accentColor, alpha: 0.12 });
+
+      view.ribbon
+        .clear()
+        .roundRect(
+          -spanWidth / 2,
+          -capsuleHeight / 2,
+          spanWidth,
+          capsuleHeight,
+          radius,
+        )
+        .fill({ color: view.data.accentColor, alpha: 0.33 })
+        .roundRect(
+          -spanWidth / 2,
+          -capsuleHeight / 2,
+          spanWidth,
+          capsuleHeight,
+          radius,
+        )
+        .stroke({ width: 1.25, color: view.data.accentColor, alpha: 0.95 });
+
+      const zoomGate = this.zoom >= 0.9;
+      const showPrimaryLabels = spanWidth > 280 && zoomGate;
+      const showDescription = spanWidth > 320 && this.zoom >= 1;
+
+      const showHoverLabels =
+        !showPrimaryLabels && view.data.hovered === true && this.zoom >= 0.6;
+
+      view.titleLabel.visible = showPrimaryLabels || showHoverLabels;
+      view.rangeLabel.visible = showPrimaryLabels || showHoverLabels;
+      view.descriptionLabel.visible = showDescription;
+
+      if (view.titleLabel.visible) {
+        view.titleLabel.x = 0;
+        view.titleLabel.y = -10;
+        view.rangeLabel.x = 0;
+        view.rangeLabel.y = 10;
+      }
+
+      if (showDescription) {
+        view.descriptionLabel.x = 0;
+        view.descriptionLabel.y = capsuleHeight / 2 + 12;
+      }
+    }
+  }
+
+  private formatSpanRange(span: InternalSpan): string {
+    const duration = Math.abs(span.endTimestamp - span.startTimestamp);
+    const startDate = new Date(span.startTimestamp);
+    const endDate = new Date(span.endTimestamp);
+    if (duration <= 45 * DAY) {
+      return `${dayFormatter.format(startDate)} – ${dayFormatter.format(
+        endDate,
+      )}`;
+    }
+    if (duration <= 3 * YEAR) {
+      return `${monthFormatter.format(startDate)} – ${monthFormatter.format(
+        endDate,
+      )}`;
+    }
+    return `${yearFormatter.format(startDate)} – ${yearFormatter.format(
+      endDate,
+    )}`;
+  }
+
+  private createSpanView(span: InternalSpan): TimelineSpanView {
+    const container = new Container();
+    container.alpha = 0.9;
+    container.eventMode = "static";
+    container.cursor = "pointer";
+    const glow = new Graphics();
+    const ribbon = new Graphics();
+    container.addChild(glow);
+    container.addChild(ribbon);
+
+    const titleLabel = new Label({
+      text: span.title,
+      style: {
+        fontSize: 26,
+        fill: 0xffffff,
+        fontWeight: "600",
+      },
+    });
+    container.addChild(titleLabel);
+
+    const rangeLabel = new Text({
+      text: this.formatSpanRange(span),
+      style: {
+        fontFamily: "Inter, 'Arial Rounded MT Bold', sans-serif",
+        fontSize: 16,
+        fill: 0xf4f6ff,
+        align: "center",
+      },
+    });
+    rangeLabel.anchor.set(0.5);
+    container.addChild(rangeLabel);
+
+    const descriptionLabel = new Text({
+      text: getDescriptionPreview(span.description),
+      style: {
+        fontFamily: "Inter, 'Arial Rounded MT Bold', sans-serif",
+        fontSize: 16,
+        fill: 0xffffff,
+        wordWrap: true,
+        wordWrapWidth: 360,
+        lineHeight: 22,
+        align: "center",
+      },
+    });
+    descriptionLabel.anchor.set(0.5, 0);
+    container.addChild(descriptionLabel);
+
+    container.interactive = true;
+    container.on("pointertap", () => {
+      this.onSelectEntry?.(span);
+    });
+    container.on("pointerover", () => {
+      container.alpha = 1;
+      container.getChildAt(1).alpha = 1;
+      span.hovered = true;
+      this.layout();
+    });
+    container.on("pointerout", () => {
+      container.alpha = 0.9;
+      container.getChildAt(1).alpha = 1;
+      span.hovered = false;
+      this.layout();
+    });
+    this.spanLayer.addChild(container);
+
+    return {
+      container,
+      glow,
+      ribbon,
+      titleLabel,
+      rangeLabel,
+      descriptionLabel,
+      data: span,
+    };
+  }
+
   private createEventView(
     event: InternalEvent,
     index: number,
   ): TimelineEventView {
     const container = new Container();
     container.alpha = 0.92;
+    container.eventMode = "static";
+    container.cursor = "pointer";
 
     const stem = new Graphics();
     container.addChild(stem);
 
     const marker = new Graphics()
-      .circle(0, 0, 13)
-      .fill({ color: event.accentColor, alpha: 0.95 })
-      .circle(0, 0, 6)
+      .circle(0, 0, 11)
+      .fill({ color: event.accentColor, alpha: 0.9 })
+      .circle(0, 0, 5)
       .fill({ color: 0x0b0b0d })
-      .circle(0, 0, 3)
+      .circle(0, 0, 2.5)
       .fill({ color: 0xffffff });
     marker.y = 0;
     container.addChild(marker);
@@ -539,20 +847,23 @@ export class Timeline extends Container {
     container.addChild(titleLabel);
 
     const descriptionLabel = new Text({
-      text: event.description,
+      text: getDescriptionPreview(event.description),
       style: {
         fontFamily: "Inter, 'Arial Rounded MT Bold', sans-serif",
-        fontSize: 18,
-        fill: 0xdde2f0,
+        fontSize: 16,
+        fill: 0xdfe3f2,
         wordWrap: true,
-        wordWrapWidth: 280,
-        lineHeight: 26,
+        wordWrapWidth: 240,
+        lineHeight: 24,
         align: "center",
       },
     });
     descriptionLabel.anchor.set(0.5, 0);
     container.addChild(descriptionLabel);
 
+    container.on("pointertap", () => {
+      this.onSelectEntry?.(event);
+    });
     this.addChild(container);
 
     return {

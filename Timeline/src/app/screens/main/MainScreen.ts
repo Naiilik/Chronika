@@ -1,14 +1,19 @@
-import { FancyButton } from "@pixi/ui";
 import { animate } from "motion";
 import type { AnimationPlaybackControls } from "motion/react";
 import type { DestroyOptions, FederatedPointerEvent, Ticker } from "pixi.js";
 import { Container, Graphics } from "pixi.js";
 
 import { engine } from "../../getEngine";
-import { PausePopup } from "../../popups/PausePopup";
-import { SettingsPopup } from "../../popups/SettingsPopup";
+import { Label } from "../../ui/Label";
 import { Timeline } from "./Timeline";
-import { timelineEvents } from "./timelineData";
+import { TimelineControls } from "./TimelineControls";
+import { TimelineDetailsPanel } from "./TimelineDetailsPanel";
+import {
+  TimelineSearchControls,
+  type TimelineFilterState,
+} from "./TimelineSearchControls";
+import type { TimelineEntryData } from "./timelineData";
+import { timelineStore } from "./timelineData";
 
 /** The screen that holds the app */
 export class MainScreen extends Container {
@@ -16,8 +21,6 @@ export class MainScreen extends Container {
   public static assetBundles = ["main"];
 
   public mainContainer: Container;
-  private pauseButton: FancyButton;
-  private settingsButton: FancyButton;
   private timeline: Timeline;
   private paused = false;
   private zoomLevel = 1;
@@ -26,6 +29,16 @@ export class MainScreen extends Container {
   private isPanning = false;
   private lastPanX = 0;
   private pointerAxisX = 0;
+  private timelineStoreUnsubscribe?: () => void;
+  private controls?: TimelineControls;
+  private searchControls?: TimelineSearchControls;
+  private detailPanel: TimelineDetailsPanel;
+  private addEntryButton: Container;
+  private addEntryButtonBackground: Graphics;
+  private searchButton: Container;
+  private searchButtonBackground: Graphics;
+  private stageWidth = 0;
+  private filterState: TimelineFilterState = { tags: [] };
   private readonly onWheel = (event: WheelEvent) => {
     event.preventDefault();
     const zoomFactor = Math.exp(-event.deltaY * 0.001);
@@ -54,45 +67,62 @@ export class MainScreen extends Container {
     this.panSurface.on("globalpointermove", this.handlePanMove);
     this.panSurface.on("globalpointerup", this.handlePanEnd);
     this.mainContainer.addChild(this.panSurface);
-    this.timeline = new Timeline(timelineEvents);
+    this.timeline = new Timeline([], this.handleEntrySelected);
     this.timeline.zIndex = 1;
     this.mainContainer.addChild(this.timeline);
     this.timeline.setZoom(this.zoomLevel);
+    this.timelineStoreUnsubscribe = timelineStore.subscribe((entries) => {
+      this.timeline.setEntries(entries);
+      this.applyFilters();
+    });
+    this.controls = new TimelineControls();
+    this.detailPanel = new TimelineDetailsPanel();
+    this.searchControls = new TimelineSearchControls(this.handleFilterChange);
+    this.searchControls.close();
     this.attachWheelListener();
 
-    const buttonAnimations = {
-      hover: {
-        props: {
-          scale: { x: 1.1, y: 1.1 },
-        },
-        duration: 100,
+    this.addEntryButton = new Container();
+    this.addEntryButton.eventMode = "static";
+    this.addEntryButton.cursor = "pointer";
+    this.addEntryButtonBackground = new Graphics();
+    this.addEntryButton.addChild(this.addEntryButtonBackground);
+    const icon = new Label({
+      text: "+",
+      style: {
+        fontSize: 42,
+        fill: 0xffffff,
+        fontWeight: "600",
       },
-      pressed: {
-        props: {
-          scale: { x: 0.9, y: 0.9 },
-        },
-        duration: 100,
+    });
+    this.addEntryButton.addChild(icon);
+    this.addEntryButton.on("pointertap", this.handleAddEntryButtonPress);
+    this.addEntryButton.on("pointerover", this.handleAddEntryButtonOver);
+    this.addEntryButton.on("pointerout", this.handleAddEntryButtonOut);
+    this.addEntryButton.on("pointerupoutside", this.handleAddEntryButtonOut);
+    this.addChild(this.addEntryButton);
+    this.addEntryButton.alpha = 0.95;
+    this.searchButton = new Container();
+    this.searchButton.eventMode = "static";
+    this.searchButton.cursor = "pointer";
+    this.searchButtonBackground = new Graphics();
+    this.searchButton.addChild(this.searchButtonBackground);
+    const searchIcon = new Label({
+      text: "⌕",
+      style: {
+        fontSize: 34,
+        fill: 0xffffff,
+        fontWeight: "600",
       },
-    };
-    this.pauseButton = new FancyButton({
-      defaultView: "icon-pause.png",
-      anchor: 0.5,
-      animations: buttonAnimations,
     });
-    this.pauseButton.onPress.connect(() =>
-      engine().navigation.presentPopup(PausePopup),
-    );
-    this.addChild(this.pauseButton);
-
-    this.settingsButton = new FancyButton({
-      defaultView: "icon-settings.png",
-      anchor: 0.5,
-      animations: buttonAnimations,
-    });
-    this.settingsButton.onPress.connect(() =>
-      engine().navigation.presentPopup(SettingsPopup),
-    );
-    this.addChild(this.settingsButton);
+    this.searchButton.addChild(searchIcon);
+    this.searchButton.on("pointertap", this.handleSearchButtonPress);
+    this.searchButton.on("pointerover", this.handleSearchButtonOver);
+    this.searchButton.on("pointerout", this.handleSearchButtonOut);
+    this.searchButton.on("pointerupoutside", this.handleSearchButtonOut);
+    this.searchButton.alpha = 0.95;
+    this.addChild(this.searchButton);
+    this.layoutActionButtons();
+    this.updateSearchButtonState();
   }
 
   /** Prepare the screen just before showing */
@@ -126,10 +156,7 @@ export class MainScreen extends Container {
 
     this.mainContainer.x = centerX;
     this.mainContainer.y = centerY;
-    this.pauseButton.x = 30;
-    this.pauseButton.y = 30;
-    this.settingsButton.x = width - 30;
-    this.settingsButton.y = 30;
+    this.layoutActionButtons(width);
 
     this.panSurface
       .clear()
@@ -141,13 +168,7 @@ export class MainScreen extends Container {
 
   /** Show screen with animations */
   public async show(): Promise<void> {
-    engine().audio.bgm.play("main/sounds/bgm-main.mp3", { volume: 0.5 });
-
-    const elementsToAnimate = [
-      this.pauseButton,
-      this.settingsButton,
-      this.timeline,
-    ];
+    const elementsToAnimate = [this.addEntryButton, this.timeline];
 
     let finalPromise!: AnimationPlaybackControls;
     for (const element of elementsToAnimate) {
@@ -166,14 +187,52 @@ export class MainScreen extends Container {
   public async hide() {}
 
   /** Auto pause the app when window go out of focus */
-  public blur() {
-    if (!engine().navigation.currentPopup) {
-      engine().navigation.presentPopup(PausePopup);
-    }
-  }
+  public blur() {}
 
   public override destroy(options?: DestroyOptions): void {
     this.detachWheelListener();
+    if (this.timelineStoreUnsubscribe) {
+      this.timelineStoreUnsubscribe();
+      this.timelineStoreUnsubscribe = undefined;
+    }
+    if (this.controls) {
+      this.controls.destroy();
+      this.controls = undefined;
+    }
+    this.detailPanel.destroy();
+    if (this.searchControls) {
+      this.searchControls.destroy();
+      this.searchControls = undefined;
+    }
+    this.addEntryButton.removeListener(
+      "pointertap",
+      this.handleAddEntryButtonPress,
+    );
+    this.addEntryButton.removeListener(
+      "pointerover",
+      this.handleAddEntryButtonOver,
+    );
+    this.addEntryButton.removeListener(
+      "pointerout",
+      this.handleAddEntryButtonOut,
+    );
+    this.addEntryButton.removeListener(
+      "pointerupoutside",
+      this.handleAddEntryButtonOut,
+    );
+    this.searchButton.removeListener(
+      "pointertap",
+      this.handleSearchButtonPress,
+    );
+    this.searchButton.removeListener(
+      "pointerover",
+      this.handleSearchButtonOver,
+    );
+    this.searchButton.removeListener("pointerout", this.handleSearchButtonOut);
+    this.searchButton.removeListener(
+      "pointerupoutside",
+      this.handleSearchButtonOut,
+    );
     this.panSurface.removeListener("pointerdown", this.handlePanStart);
     this.panSurface.removeListener("pointermove", this.handlePointerHover);
     this.panSurface.removeListener("pointerover", this.handlePointerHover);
@@ -230,5 +289,81 @@ export class MainScreen extends Container {
   private updatePointerAxis(event: FederatedPointerEvent): void {
     const local = this.mainContainer.toLocal(event.global);
     this.pointerAxisX = local.x;
+  }
+
+  private handleFilterChange = (filter: TimelineFilterState): void => {
+    this.filterState = filter;
+    this.applyFilters();
+  };
+
+  private handleEntrySelected = (entry: TimelineEntryData): void => {
+    this.detailPanel.open(entry);
+  };
+
+  private applyFilters(): void {
+    this.timeline.setFilter(this.filterState.tags);
+  }
+
+  private layoutActionButtons(width?: number): void {
+    if (width !== undefined) {
+      this.stageWidth = width;
+    }
+    const targetWidth = width ?? (this.stageWidth || 1280);
+    const anchorX = targetWidth - 80;
+    this.addEntryButton.x = anchorX;
+    this.addEntryButton.y = 70;
+    this.addEntryButtonBackground
+      .clear()
+      .circle(0, 0, 32)
+      .fill({ color: 0x10121b, alpha: 0.9 })
+      .circle(0, 0, 32)
+      .stroke({ width: 2, color: 0xffffff, alpha: 0.35 })
+      .circle(0, 0, 32)
+      .stroke({ width: 6, color: 0xec1561, alpha: 0.25 });
+    this.searchButton.x = anchorX;
+    this.searchButton.y = this.addEntryButton.y + 72;
+    this.searchButtonBackground
+      .clear()
+      .circle(0, 0, 26)
+      .fill({ color: 0x11121a, alpha: 0.9 })
+      .circle(0, 0, 26)
+      .stroke({ width: 1.6, color: 0xffffff, alpha: 0.3 })
+      .circle(0, 0, 26)
+      .stroke({ width: 5, color: 0x7b88ff, alpha: 0.25 });
+  }
+
+  private handleAddEntryButtonPress = (): void => {
+    this.controls?.toggle();
+  };
+
+  private handleAddEntryButtonOver = (): void => {
+    this.addEntryButton.scale.set(1.08);
+    this.addEntryButton.alpha = 1;
+  };
+
+  private handleAddEntryButtonOut = (): void => {
+    this.addEntryButton.scale.set(1);
+    this.addEntryButton.alpha = 0.95;
+  };
+
+  private handleSearchButtonPress = (): void => {
+    if (!this.searchControls) return;
+    this.searchControls.toggle();
+    this.updateSearchButtonState();
+  };
+
+  private handleSearchButtonOver = (): void => {
+    this.searchButton.scale.set(1.08);
+    this.searchButton.alpha = 1;
+  };
+
+  private handleSearchButtonOut = (): void => {
+    this.searchButton.scale.set(1);
+    this.updateSearchButtonState();
+  };
+
+  private updateSearchButtonState(): void {
+    const isOpen = this.searchControls?.isOpen() ?? false;
+    this.searchButton.alpha = isOpen ? 1 : 0.95;
   }
 }

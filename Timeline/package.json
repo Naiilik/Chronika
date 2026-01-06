@@ -7,7 +7,8 @@
     "start": "npm run dev",
     "build": "npm run lint && tsc && vite build",
     "lint": "eslint .",
-    "dev": "vite"
+    "dev": "vite",
+    "preview": "vite preview"
   },
   "dependencies": {
     "@esotericsoftware/spine-pixi-v8": "^4.2.74",
