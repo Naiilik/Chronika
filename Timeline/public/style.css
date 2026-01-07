@@ -243,6 +243,20 @@ body {
     backdrop-filter: blur(14px);
     z-index: 11;
     transition: transform 0.2s ease, opacity 0.2s ease;
+    overflow: hidden;
+}
+
+.timeline-details[data-mode="preview"] .timeline-details__form {
+    display: none !important;
+}
+
+.timeline-details[data-mode="edit"] .timeline-details__image,
+.timeline-details[data-mode="edit"] .timeline-details__preview-view {
+    display: none !important;
+}
+
+.timeline-details[data-mode="edit"] .timeline-details__form {
+    display: flex;
 }
 
 .timeline-details--hidden {
@@ -288,6 +302,7 @@ body {
     gap: 12px;
     flex: 1;
     overflow-y: auto;
+    min-height: 0;
 }
 
 .timeline-details__field {
@@ -315,6 +330,17 @@ body {
     font-size: 14px;
 }
 
+.timeline-details__field--description {
+    flex: 1;
+    min-height: 0;
+}
+
+.timeline-details__field--description textarea {
+    flex: 1;
+    min-height: 120px;
+    resize: vertical;
+}
+
 .timeline-details__preview {
     border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 16px;
@@ -324,12 +350,16 @@ body {
     font-size: 15px;
     line-height: 1.6;
     overflow-y: auto;
+    width: 100%;
+    box-sizing: border-box;
 }
 
 .timeline-details__preview--compact {
-    min-height: 140px;
-    max-height: 260px;
+    flex: 1;
+    min-height: 0;
     margin-top: 8px;
+    font-size: 17px;
+    line-height: 1.7;
 }
 
 .timeline-details__preview-body {
@@ -339,9 +369,10 @@ body {
     color: #f6f7fb;
     font-size: 17px;
     line-height: 1.7;
-    max-height: 420px;
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
-    padding-right: 8px;
+    padding-right: 6px;
 }
 
 .timeline-details__preview[data-empty="true"],
@@ -428,6 +459,11 @@ body {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    flex: 1;
+    min-height: 0;
+    padding-right: 6px;
+    padding-bottom: 24px;
+    overflow-y: auto;
 }
 
 .timeline-details__preview-title {
@@ -448,6 +484,7 @@ body {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
+    flex-shrink: 0;
 }
 
 .timeline-details__preview-tag {
@@ -465,6 +502,11 @@ body {
 
 .timeline-details__edit-button {
     align-self: flex-start;
+    margin-top: 16px;
+    margin-bottom: 8px;
+    position: sticky;
+    bottom: 16px;
+    z-index: 1;
     border: 1px solid rgba(255, 255, 255, 0.3);
     border-radius: 999px;
     padding: 6px 14px;
