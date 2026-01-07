@@ -115,6 +115,7 @@ export class TimelineDetailsPanel {
       this.descriptionInput,
       "timeline-details__field",
     );
+    descriptionField.classList.add("timeline-details__field--description");
     this.descriptionPreview = document.createElement("div");
     this.descriptionPreview.className =
       "timeline-details__preview timeline-details__preview--compact";
@@ -426,7 +427,9 @@ export class TimelineDetailsPanel {
   private setEditingMode(editing: boolean): void {
     this.isEditing = editing;
     this.previewView.hidden = editing;
+    this.previewImage.hidden = editing;
     this.form.hidden = !editing;
+    this.container.dataset.mode = editing ? "edit" : "preview";
   }
 
   private exitEditMode(): void {
